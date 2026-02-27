@@ -311,8 +311,8 @@ router.get("/:conversationId", verifyToken, async (req, res) => {
       LEFT JOIN users ru ON rm.sender_id = ru.id
       WHERE m.conversation_id = ? AND m.is_deleted = FALSE AND md.id IS NULL
       ORDER BY m.created_at DESC
-      LIMIT ? OFFSET ?`,
-      [req.userId, req.userId, conversationId, limitNum, offsetNum],
+      LIMIT ${limitNum} OFFSET ${offsetNum}`,
+      [req.userId, req.userId, conversationId],
     );
 
     const countResult = await db.query(

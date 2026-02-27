@@ -57,8 +57,8 @@ router.get('/', verifyToken, async (req, res) => {
       LEFT JOIN users u ON cp2.user_id = u.id
       WHERE cp.user_id = ? AND (cp.is_deleted = 0 OR cp.is_deleted IS NULL)
       ORDER BY c.last_message_time DESC
-      LIMIT ? OFFSET ?`,
-      [req.userId, req.userId, req.userId, limitNum, offsetNum]
+      LIMIT ${limitNum} OFFSET ${offsetNum}`,
+      [req.userId, req.userId, req.userId]
     );
 
     // Format response

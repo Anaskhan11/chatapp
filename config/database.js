@@ -10,9 +10,9 @@ const mysql = require("mysql2/promise");
 
 // Create connection pool
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || "localhost" || "10.0.241.141",
+  host: process.env.DB_HOST || "localhost",
   user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "" || "Muhammad12590@#$%*()",
+  password: process.env.DB_PASSWORD || "" ,
   database: process.env.DB_NAME || "chatapp",
   port: process.env.DB_PORT || 3306,
   waitForConnections: true,

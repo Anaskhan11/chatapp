@@ -37,8 +37,8 @@ router.get("/search", verifyToken, async (req, res) => {
        FROM users 
        WHERE (username LIKE ? OR full_name LIKE ? OR email LIKE ?)
        AND id != ?
-       LIMIT ? OFFSET ?`,
-      [searchTerm, searchTerm, searchTerm, req.userId, limitNum, offsetNum],
+       LIMIT ${limitNum} OFFSET ${offsetNum}`,
+      [searchTerm, searchTerm, searchTerm, req.userId],
     );
 
     // Get total count
@@ -231,8 +231,8 @@ router.get("/", verifyToken, async (req, res) => {
        FROM users 
        WHERE id != ?
        ORDER BY full_name ASC
-       LIMIT ? OFFSET ?`,
-      [req.userId, limitNum, offsetNum],
+       LIMIT ${limitNum} OFFSET ${offsetNum}`,
+      [req.userId],
     );
 
     const countResult = await db.query(

@@ -317,8 +317,8 @@ router.get('/history', verifyToken, async (req, res) => {
       JOIN users callee ON c.callee_id = callee.id
       WHERE c.caller_id = ? OR c.callee_id = ?
       ORDER BY c.started_at DESC
-      LIMIT ? OFFSET ?`,
-      [req.userId, req.userId, limitNum, offsetNum]
+      LIMIT ${limitNum} OFFSET ${offsetNum}`,
+      [req.userId, req.userId]
     );
 
     // Get total count
