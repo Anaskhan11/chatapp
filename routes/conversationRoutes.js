@@ -19,8 +19,12 @@ const router = express.Router();
 router.get("/", verifyToken, async (req, res) => {
   try {
     const { limit = 20, offset = 0 } = req.query;
-    const limitNum = parseInt(limit);
-    const offsetNum = parseInt(offset);
+    let limitNum = parseInt(limit);
+    let offsetNum = parseInt(offset);
+
+    // Validate limit and offset to prevent NaN or negative values
+    if (isNaN(limitNum) || limitNum < 0) limitNum = 20;
+    if (isNaN(offsetNum) || offsetNum < 0) offsetNum = 0;
 
     // Get conversations with last message and unread count
     // Exclude soft-deleted conversations

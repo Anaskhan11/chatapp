@@ -11,8 +11,8 @@ const mysql = require("mysql2/promise");
 // Create connection pool
 const pool = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
+  user: process.env.DB_USER || "chatapp_user",
+  password: "Muhammmad12590@#$%*()",
   database: process.env.DB_NAME || "chatapp",
   port: process.env.DB_PORT || 3306,
   waitForConnections: true,
@@ -38,7 +38,7 @@ const testConnection = async () => {
 // Execute query with parameters
 const query = async (sql, params) => {
   try {
-    const [results] = await pool.execute(sql, params);
+    const [results] = await pool.query(sql, params);
     return results;
   } catch (error) {
     console.error("Database query error:", error.message);
