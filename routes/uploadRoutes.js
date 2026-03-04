@@ -124,8 +124,8 @@ router.post("/:type", verifyToken, upload.single("file"), (req, res) => {
       });
     }
 
-    // Generate file URL
-    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${fileType}/${req.file.filename}`;
+    // Generate file URL (relative path for robustness)
+    const fileUrl = `/uploads/${fileType}/${req.file.filename}`;
 
     res.json({
       success: true,
@@ -190,8 +190,8 @@ router.post("/base64/:type", verifyToken, async (req, res) => {
     // Write file
     fs.writeFileSync(filePath, Buffer.from(base64String, "base64"));
 
-    // Generate file URL
-    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${fileType}/${uniqueName}`;
+    // Generate file URL (relative path for robustness)
+    const fileUrl = `/uploads/${fileType}/${uniqueName}`;
 
     // Get file stats
     const stats = fs.statSync(filePath);
