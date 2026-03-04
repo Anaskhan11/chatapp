@@ -349,6 +349,21 @@ module.exports = (io) => {
       try {
         const { calleeId, type, conversationId } = data;
 
+        // Validate callee exists and is online
+        const calleeUsers = await db.query(
+          "SELECT id, username, full_name, avatar_url FROM users WHERE id = ?",
+          [calleeId],
+        );
+
+        if (calleeUsers.length === 0) {
+          return callback?.({
+            success: false,
+            error: "User not found",
+          });
+        }
+
+        const callee = calleeUsers[0];
+
         // Create call record
         const result = await db.query(
           "INSERT INTO calls (caller_id, callee_id, conversation_id, type, status) VALUES (?, ?, ?, ?, ?)",
@@ -357,20 +372,40 @@ module.exports = (io) => {
 
         const callId = result.insertId;
 
-        // Notify callee
+        console.log(
+          `Call initiated: ${socket.user.id} (${socket.user.username}) → ${calleeId} (${callee.username})`,
+        );
+
+        // Notify callee with full user info
         const calleeSocketId = connectedUsers.get(calleeId);
         if (calleeSocketId) {
           io.to(calleeSocketId).emit("incoming_call", {
             callId,
-            caller: socket.user,
+            caller: {
+              id: socket.user.id,
+              username: socket.user.username,
+              fullName: socket.user.full_name,
+              avatarUrl: socket.user.avatar_url,
+            },
             type,
+            conversationId: conversationId || null,
           });
+
+          console.log(`Incoming call notification sent to ${calleeId}`);
+        } else {
+          console.log(`Callee ${calleeId} is not online`);
         }
 
-        callback?.({ success: true, data: { callId } });
+        callback?.({
+          success: true,
+          data: { callId },
+        });
       } catch (error) {
         console.error("Call initiate error:", error);
-        callback?.({ success: false, error: "Failed to initiate call" });
+        callback?.({
+          success: false,
+          error: "Failed to initiate call",
+        });
       }
     });
 
@@ -384,27 +419,57 @@ module.exports = (io) => {
         ]);
 
         if (calls.length === 0) {
-          return callback?.({ success: false, error: "Call not found" });
+          return callback?.({
+            success: false,
+            error: "Call not found",
+          });
         }
 
         const call = calls[0];
 
-        await db.query('UPDATE calls SET status = "answered" WHERE id = ?', [
-          callId,
-        ]);
+        // Verify this user is the callee
+        if (call.callee_id !== socket.userId) {
+          return callback?.({
+            success: false,
+            error: "Unauthorized to answer this call",
+          });
+        }
 
+        // Update call status
+        await db.query(
+          'UPDATE calls SET status = "answered", started_at = NOW() WHERE id = ?',
+          [callId],
+        );
+
+        console.log(
+          `Call answered: ${socket.user.id} (${socket.user.username}) answered call from ${call.caller_id}`,
+        );
+
+        // Notify caller with FULL user info (not just socket.user)
         const callerSocketId = connectedUsers.get(call.caller_id);
         if (callerSocketId) {
           io.to(callerSocketId).emit("call_answered", {
             callId,
-            callee: socket.user,
+            callee: {
+              id: socket.user.id,
+              username: socket.user.username,
+              fullName: socket.user.full_name,
+              avatarUrl: socket.user.avatar_url,
+            },
           });
+
+          console.log(`Call answered notification sent to ${call.caller_id}`);
         }
 
-        callback?.({ success: true });
+        callback?.({
+          success: true,
+        });
       } catch (error) {
         console.error("Call answer error:", error);
-        callback?.({ success: false, error: "Failed to answer call" });
+        callback?.({
+          success: false,
+          error: "Failed to answer call",
+        });
       }
     });
 
@@ -501,7 +566,7 @@ module.exports = (io) => {
       }
     });
 
-    // WebRTC signaling - offer
+    // WebRTC signaling - offer (send caller info too)
     socket.on("webrtc_offer", (data) => {
       const { targetUserId, offer } = data;
       const targetSocketId = connectedUsers.get(targetUserId);
@@ -509,12 +574,21 @@ module.exports = (io) => {
       if (targetSocketId) {
         io.to(targetSocketId).emit("webrtc_offer", {
           senderId: socket.userId,
+          senderUsername: socket.user.username,
+          senderFullName: socket.user.full_name,
+          senderAvatar: socket.user.avatar_url,
           offer,
         });
+
+        console.log(
+          `WebRTC offer sent from ${socket.userId} to ${targetUserId}`,
+        );
+      } else {
+        console.log(`Target user ${targetUserId} not connected for offer`);
       }
     });
 
-    // WebRTC signaling - answer
+    // WebRTC signaling - answer (send callee info too)
     socket.on("webrtc_answer", (data) => {
       const { targetUserId, answer } = data;
       const targetSocketId = connectedUsers.get(targetUserId);
@@ -522,8 +596,17 @@ module.exports = (io) => {
       if (targetSocketId) {
         io.to(targetSocketId).emit("webrtc_answer", {
           senderId: socket.userId,
+          senderUsername: socket.user.username,
+          senderFullName: socket.user.full_name,
+          senderAvatar: socket.user.avatar_url,
           answer,
         });
+
+        console.log(
+          `WebRTC answer sent from ${socket.userId} to ${targetUserId}`,
+        );
+      } else {
+        console.log(`Target user ${targetUserId} not connected for answer`);
       }
     });
 
