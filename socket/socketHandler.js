@@ -1,9 +1,13 @@
 /**
  * ============================================
- * SOCKET.IO HANDLER
+ * SOCKET.IO HANDLER - ENTERPRISE EDITION
  * ============================================
  * Real-time messaging, typing indicators, and WebRTC signaling
- * WhatsApp Features: delivered status, read receipts
+ * Features:
+ * - Active call tracking (busy detection)
+ * - 60-second ring timeout with auto-cancel
+ * - ICE restart signaling for reconnection
+ * - WhatsApp-style message delivery receipts
  * ============================================
  */
 
@@ -14,16 +18,20 @@ const { Expo } = require("expo-server-sdk");
 // Create a new Expo SDK client
 const expo = new Expo();
 
-// Store connected users
-const connectedUsers = new Map(); // userId -> socketId
-const userSockets = new Map(); // socketId -> userId
+// Store connected users: userId -> socketId
+const connectedUsers = new Map();
+// Store active calls: userId -> { callId, otherUserId, startedAt }
+const activeCallsMap = new Map();
+// Store ring timers: callId -> timeoutHandle
+const ringTimers = new Map();
 
 module.exports = (io) => {
-  // Authentication middleware
+  // ============================================
+  // AUTHENTICATION MIDDLEWARE
+  // ============================================
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token || socket.handshake.query.token;
-
       if (!token) {
         return next(new Error("Authentication error: Token required"));
       }
@@ -49,11 +57,12 @@ module.exports = (io) => {
   });
 
   io.on("connection", (socket) => {
-    console.log(`User connected: ${socket.userId} (${socket.user.username})`);
+    console.log(
+      `✅ User connected: ${socket.userId} (${socket.user.username})`,
+    );
 
     // Store connection
     connectedUsers.set(socket.userId, socket.id);
-    userSockets.set(socket.id, socket.userId);
 
     // Update user online status
     updateUserOnlineStatus(socket.userId, true, socket.id);
@@ -64,11 +73,18 @@ module.exports = (io) => {
     // Join user's conversations
     joinUserConversations(socket);
 
+    // Emit online status to all
+    socket.broadcast.emit("user_online", {
+      userId: socket.userId,
+      username: socket.user.username,
+      fullName: socket.user.full_name,
+      avatarUrl: socket.user.avatar_url,
+    });
+
     // ============================================
     // MESSAGE EVENTS
     // ============================================
 
-    // Send message
     socket.on("send_message", async (data, callback) => {
       try {
         const {
@@ -82,7 +98,6 @@ module.exports = (io) => {
           replyToMessageId,
         } = data;
 
-        // Validate
         if (!conversationId) {
           return callback?.({
             success: false,
@@ -269,7 +284,6 @@ module.exports = (io) => {
       try {
         const { conversationId, isTyping } = data;
 
-        // Check if user is participant
         const participant = await db.query(
           "SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ?",
           [conversationId, socket.userId],
@@ -293,7 +307,6 @@ module.exports = (io) => {
       try {
         const { conversationId, messageId } = data;
 
-        // Update last read message
         await db.query(
           `UPDATE conversation_participants 
            SET last_read_message_id = ? 
@@ -301,20 +314,17 @@ module.exports = (io) => {
           [messageId, conversationId, socket.userId],
         );
 
-        // Add read receipt
         await db.query(
           `INSERT IGNORE INTO message_read_receipts (message_id, user_id) VALUES (?, ?)`,
           [messageId, socket.userId],
         );
 
-        // Update status to 'read' for all messages in this conversation up to messageId sent by others
         await db.query(
           `UPDATE messages SET status = 'read' 
            WHERE conversation_id = ? AND id <= ? AND sender_id != ? AND status != 'read'`,
           [conversationId, messageId, socket.userId],
         );
 
-        // Notify senders in this conversation
         const affectedSenders = await db.query(
           `SELECT DISTINCT sender_id FROM messages 
            WHERE conversation_id = ? AND id <= ? AND sender_id != ?`,
@@ -341,28 +351,39 @@ module.exports = (io) => {
     });
 
     // ============================================
-    // WEBRTC CALLING EVENTS
+    // WEBRTC CALLING EVENTS - ENTERPRISE EDITION
     // ============================================
 
-    // Initiate call
+    /**
+     * INITIATE CALL
+     * - Creates call record in DB
+     * - Checks if callee is online & not already in call (busy)
+     * - Sends incoming_call or call_busy to caller
+     * - Sets a 60-second ring timeout to auto-cancel
+     */
     socket.on("call_initiate", async (data, callback) => {
       try {
         const { calleeId, type, conversationId } = data;
 
-        // Validate callee exists and is online
+        // Validate callee
         const calleeUsers = await db.query(
           "SELECT id, username, full_name, avatar_url FROM users WHERE id = ?",
           [calleeId],
         );
 
         if (calleeUsers.length === 0) {
-          return callback?.({
-            success: false,
-            error: "User not found",
-          });
+          return callback?.({ success: false, error: "User not found" });
         }
 
         const callee = calleeUsers[0];
+
+        // ✅ ENTERPRISE FIX: Check if caller is already in a call
+        if (activeCallsMap.has(socket.userId)) {
+          return callback?.({
+            success: false,
+            error: "You are already in a call",
+          });
+        }
 
         // Create call record
         const result = await db.query(
@@ -373,8 +394,32 @@ module.exports = (io) => {
         const callId = result.insertId;
 
         console.log(
-          `Call initiated: ${socket.user.id} (${socket.user.username}) → ${calleeId} (${callee.username})`,
+          `📞 Call initiated: ${socket.user.username} → ${callee.username} (callId=${callId})`,
         );
+
+        // ✅ ENTERPRISE FIX: Check if callee is already in a call (BUSY)
+        if (activeCallsMap.has(calleeId)) {
+          console.log(`📵 Callee ${calleeId} is BUSY`);
+          // Mark as missed immediately
+          await db.query(
+            'UPDATE calls SET status = "missed", ended_at = NOW() WHERE id = ?',
+            [callId],
+          );
+          // Notify caller that callee is busy
+          socket.emit("call_busy", {
+            callId,
+            callee: {
+              id: callee.id,
+              username: callee.username,
+              fullName: callee.full_name,
+              avatarUrl: callee.avatar_url,
+            },
+          });
+          return callback?.({ success: false, error: "User is busy" });
+        }
+
+        // Record caller as in-call
+        activeCallsMap.set(socket.userId, { callId, otherUserId: calleeId });
 
         // Notify callee with full user info
         const calleeSocketId = connectedUsers.get(calleeId);
@@ -391,25 +436,72 @@ module.exports = (io) => {
             conversationId: conversationId || null,
           });
 
-          console.log(`Incoming call notification sent to ${calleeId}`);
+          console.log(`📲 incoming_call sent to ${callee.username}`);
         } else {
-          console.log(`Callee ${calleeId} is not online`);
+          console.log(`⚠️ Callee ${calleeId} is not online`);
+          // Mark as missed immediately
+          await db.query(
+            'UPDATE calls SET status = "missed", ended_at = NOW() WHERE id = ?',
+            [callId],
+          );
+          activeCallsMap.delete(socket.userId);
+          return callback?.({ success: false, error: "User is not online" });
         }
 
-        callback?.({
-          success: true,
-          data: { callId },
-        });
+        callback?.({ success: true, data: { callId } });
+
+        // ✅ ENTERPRISE FIX: 60-second ring timeout
+        // If callee doesn't answer in 60s, auto-cancel
+        const ringTimer = setTimeout(async () => {
+          // Only fire if call is still in "ongoing" state
+          const stillOngoing = await db.query(
+            'SELECT id FROM calls WHERE id = ? AND status = "ongoing"',
+            [callId],
+          );
+
+          if (stillOngoing.length > 0) {
+            console.log(`⏱️ Call ${callId} timed out (no answer in 60s)`);
+
+            await db.query(
+              'UPDATE calls SET status = "missed", ended_at = NOW() WHERE id = ?',
+              [callId],
+            );
+
+            // Clean up active call tracking
+            activeCallsMap.delete(socket.userId);
+
+            // Notify caller: timeout
+            const callerSocketId = connectedUsers.get(socket.userId);
+            if (callerSocketId) {
+              io.to(callerSocketId).emit("call_timeout", { callId });
+            }
+
+            // Notify callee: call cancelled (stop ringing)
+            if (calleeSocketId) {
+              io.to(calleeSocketId).emit("call_ended", {
+                callId,
+                duration: 0,
+                reason: "timeout",
+              });
+            }
+          }
+
+          ringTimers.delete(callId);
+        }, 60000); // 60 seconds
+
+        ringTimers.set(callId, ringTimer);
       } catch (error) {
         console.error("Call initiate error:", error);
-        callback?.({
-          success: false,
-          error: "Failed to initiate call",
-        });
+        callback?.({ success: false, error: "Failed to initiate call" });
       }
     });
 
-    // Answer call
+    /**
+     * ANSWER CALL
+     * - Cancels ring timer
+     * - Records callee as in-call
+     * - Notifies caller → caller creates WebRTC offer (correct timing!)
+     */
     socket.on("call_answer", async (data, callback) => {
       try {
         const { callId } = data;
@@ -419,20 +511,23 @@ module.exports = (io) => {
         ]);
 
         if (calls.length === 0) {
-          return callback?.({
-            success: false,
-            error: "Call not found",
-          });
+          return callback?.({ success: false, error: "Call not found" });
         }
 
         const call = calls[0];
 
-        // Verify this user is the callee
         if (call.callee_id !== socket.userId) {
           return callback?.({
             success: false,
             error: "Unauthorized to answer this call",
           });
+        }
+
+        // ✅ Cancel ring timer
+        if (ringTimers.has(callId)) {
+          clearTimeout(ringTimers.get(callId));
+          ringTimers.delete(callId);
+          console.log(`✅ Ring timer cleared for call ${callId}`);
         }
 
         // Update call status
@@ -441,11 +536,18 @@ module.exports = (io) => {
           [callId],
         );
 
+        // Record callee as in-call
+        activeCallsMap.set(socket.userId, {
+          callId,
+          otherUserId: call.caller_id,
+        });
+
         console.log(
-          `Call answered: ${socket.user.id} (${socket.user.username}) answered call from ${call.caller_id}`,
+          `✅ Call answered: ${socket.user.username} answered call ${callId}`,
         );
 
-        // Notify caller with FULL user info (not just socket.user)
+        // ✅ ENTERPRISE FIX: Notify caller with full callee info
+        // The caller will now create the WebRTC offer (correct timing!)
         const callerSocketId = connectedUsers.get(call.caller_id);
         if (callerSocketId) {
           io.to(callerSocketId).emit("call_answered", {
@@ -457,23 +559,21 @@ module.exports = (io) => {
               avatarUrl: socket.user.avatar_url,
             },
           });
-
-          console.log(`Call answered notification sent to ${call.caller_id}`);
         }
 
-        callback?.({
-          success: true,
-        });
+        callback?.({ success: true });
       } catch (error) {
         console.error("Call answer error:", error);
-        callback?.({
-          success: false,
-          error: "Failed to answer call",
-        });
+        callback?.({ success: false, error: "Failed to answer call" });
       }
     });
 
-    // Reject call
+    /**
+     * REJECT CALL
+     * - Cancels ring timer
+     * - Marks call as rejected
+     * - Notifies caller
+     */
     socket.on("call_reject", async (data, callback) => {
       try {
         const { callId } = data;
@@ -488,16 +588,31 @@ module.exports = (io) => {
 
         const call = calls[0];
 
+        // Cancel ring timer
+        if (ringTimers.has(callId)) {
+          clearTimeout(ringTimers.get(callId));
+          ringTimers.delete(callId);
+        }
+
         await db.query(
           'UPDATE calls SET status = "rejected", ended_at = NOW() WHERE id = ?',
           [callId],
         );
 
+        // Clean up active call tracking
+        activeCallsMap.delete(call.caller_id);
+        activeCallsMap.delete(call.callee_id);
+
         const callerSocketId = connectedUsers.get(call.caller_id);
         if (callerSocketId) {
           io.to(callerSocketId).emit("call_rejected", {
             callId,
-            callee: socket.user,
+            callee: {
+              id: socket.user.id,
+              username: socket.user.username,
+              fullName: socket.user.full_name,
+              avatarUrl: socket.user.avatar_url,
+            },
           });
         }
 
@@ -508,7 +623,12 @@ module.exports = (io) => {
       }
     });
 
-    // End call
+    /**
+     * END CALL
+     * - Clears active call tracking
+     * - Calculates duration
+     * - Notifies other party
+     */
     socket.on("call_end", async (data, callback) => {
       try {
         const { callId } = data;
@@ -523,8 +643,14 @@ module.exports = (io) => {
 
         const call = calls[0];
 
+        // Cancel ring timer (if still ringing)
+        if (ringTimers.has(callId)) {
+          clearTimeout(ringTimers.get(callId));
+          ringTimers.delete(callId);
+        }
+
         let durationSeconds = 0;
-        if (call.status === "answered") {
+        if (call.status === "answered" && call.started_at) {
           const startTime = new Date(call.started_at);
           const endTime = new Date();
           durationSeconds = Math.floor((endTime - startTime) / 1000);
@@ -534,6 +660,10 @@ module.exports = (io) => {
           'UPDATE calls SET status = "ended", ended_at = NOW(), duration_seconds = ? WHERE id = ?',
           [durationSeconds, callId],
         );
+
+        // Clean up active call tracking for both parties
+        activeCallsMap.delete(call.caller_id);
+        activeCallsMap.delete(call.callee_id);
 
         const otherUserId =
           call.caller_id === socket.userId ? call.callee_id : call.caller_id;
@@ -553,20 +683,11 @@ module.exports = (io) => {
       }
     });
 
-    // WebRTC signaling - ICE candidate
-    socket.on("webrtc_ice_candidate", (data) => {
-      const { targetUserId, candidate } = data;
-      const targetSocketId = connectedUsers.get(targetUserId);
+    // ============================================
+    // WEBRTC SIGNALING - RELAY ONLY (no modification)
+    // ============================================
 
-      if (targetSocketId) {
-        io.to(targetSocketId).emit("webrtc_ice_candidate", {
-          senderId: socket.userId,
-          candidate,
-        });
-      }
-    });
-
-    // WebRTC signaling - offer (send caller info too)
+    // Relay WebRTC offer
     socket.on("webrtc_offer", (data) => {
       const { targetUserId, offer } = data;
       const targetSocketId = connectedUsers.get(targetUserId);
@@ -579,16 +700,15 @@ module.exports = (io) => {
           senderAvatar: socket.user.avatar_url,
           offer,
         });
-
         console.log(
-          `WebRTC offer sent from ${socket.userId} to ${targetUserId}`,
+          `📤 WebRTC offer: ${socket.user.username} → ${targetUserId}`,
         );
       } else {
-        console.log(`Target user ${targetUserId} not connected for offer`);
+        console.log(`⚠️ Target user ${targetUserId} not connected for offer`);
       }
     });
 
-    // WebRTC signaling - answer (send callee info too)
+    // Relay WebRTC answer
     socket.on("webrtc_answer", (data) => {
       const { targetUserId, answer } = data;
       const targetSocketId = connectedUsers.get(targetUserId);
@@ -601,12 +721,40 @@ module.exports = (io) => {
           senderAvatar: socket.user.avatar_url,
           answer,
         });
-
         console.log(
-          `WebRTC answer sent from ${socket.userId} to ${targetUserId}`,
+          `📤 WebRTC answer: ${socket.user.username} → ${targetUserId}`,
         );
       } else {
-        console.log(`Target user ${targetUserId} not connected for answer`);
+        console.log(`⚠️ Target user ${targetUserId} not connected for answer`);
+      }
+    });
+
+    // Relay ICE candidate
+    socket.on("webrtc_ice_candidate", (data) => {
+      const { targetUserId, candidate } = data;
+      const targetSocketId = connectedUsers.get(targetUserId);
+
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("webrtc_ice_candidate", {
+          senderId: socket.userId,
+          candidate,
+        });
+      }
+    });
+
+    // ✅ NEW: Relay ICE restart signal (for reconnection on network switch)
+    socket.on("webrtc_renegotiate", (data) => {
+      const { targetUserId, offer } = data;
+      const targetSocketId = connectedUsers.get(targetUserId);
+
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("webrtc_renegotiate", {
+          senderId: socket.userId,
+          offer,
+        });
+        console.log(
+          `🔄 ICE restart signal: ${socket.user.username} → ${targetUserId}`,
+        );
       }
     });
 
@@ -614,7 +762,6 @@ module.exports = (io) => {
     // USER PRESENCE EVENTS
     // ============================================
 
-    // Get online users
     socket.on("get_online_users", async (callback) => {
       try {
         const onlineUserIds = Array.from(connectedUsers.keys());
@@ -656,11 +803,51 @@ module.exports = (io) => {
 
     socket.on("disconnect", async () => {
       console.log(
-        `User disconnected: ${socket.userId} (${socket.user.username})`,
+        `❌ User disconnected: ${socket.userId} (${socket.user.username})`,
       );
 
       connectedUsers.delete(socket.userId);
-      userSockets.delete(socket.id);
+
+      // ✅ If user was in an active call, notify the other party
+      if (activeCallsMap.has(socket.userId)) {
+        const { callId, otherUserId } = activeCallsMap.get(socket.userId);
+
+        console.log(
+          `📵 User ${socket.userId} disconnected during call ${callId}`,
+        );
+
+        // Give 30 seconds grace period before marking call as ended
+        // (network blip reconnection window)
+        setTimeout(async () => {
+          // Check if user reconnected
+          if (!connectedUsers.has(socket.userId)) {
+            // Still disconnected - end the call
+            const calls = await db.query(
+              'SELECT status FROM calls WHERE id = ? AND status = "answered"',
+              [callId],
+            );
+
+            if (calls.length > 0) {
+              await db.query(
+                'UPDATE calls SET status = "ended", ended_at = NOW() WHERE id = ?',
+                [callId],
+              );
+            }
+
+            activeCallsMap.delete(socket.userId);
+            activeCallsMap.delete(otherUserId);
+
+            const otherSocketId = connectedUsers.get(otherUserId);
+            if (otherSocketId) {
+              io.to(otherSocketId).emit("call_ended", {
+                callId,
+                duration: 0,
+                reason: "disconnected",
+              });
+            }
+          }
+        }, 30000); // 30 second grace period
+      }
 
       await updateUserOnlineStatus(socket.userId, false, null);
 
@@ -671,10 +858,12 @@ module.exports = (io) => {
     });
   });
 
-  // Helper: deliver pending messages to a newly connected user's SENDERS
+  // ============================================
+  // HELPER FUNCTIONS
+  // ============================================
+
   async function deliverPendingMessages(userId, io) {
     try {
-      // Find messages sent TO this user that are still 'sent' (not yet delivered)
       const pendingMessages = await db.query(
         `SELECT DISTINCT m.id, m.sender_id, m.conversation_id
          FROM messages m
@@ -685,14 +874,12 @@ module.exports = (io) => {
 
       if (pendingMessages.length === 0) return;
 
-      // Group by sender
       const bySender = {};
       for (const msg of pendingMessages) {
         if (!bySender[msg.sender_id]) bySender[msg.sender_id] = [];
         bySender[msg.sender_id].push(msg);
       }
 
-      // Update all to delivered
       const msgIds = pendingMessages.map((m) => m.id);
       if (msgIds.length > 0) {
         const placeholders = msgIds.map(() => "?").join(",");
@@ -702,11 +889,9 @@ module.exports = (io) => {
         );
       }
 
-      // Notify each sender
       for (const [senderId, msgs] of Object.entries(bySender)) {
         const senderSocketId = connectedUsers.get(parseInt(senderId));
         if (senderSocketId) {
-          // Send one update per conversation
           const byConv = {};
           for (const m of msgs) {
             if (!byConv[m.conversation_id]) byConv[m.conversation_id] = m.id;
@@ -730,7 +915,6 @@ module.exports = (io) => {
     }
   }
 
-  // Helper function to update user online status
   async function updateUserOnlineStatus(userId, isOnline, socketId) {
     try {
       await db.query(
@@ -742,7 +926,6 @@ module.exports = (io) => {
     }
   }
 
-  // Helper function to join user's conversations
   async function joinUserConversations(socket) {
     try {
       const conversations = await db.query(

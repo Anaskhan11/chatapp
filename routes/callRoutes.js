@@ -3,83 +3,131 @@
  * CALL ROUTES
  * ============================================
  * Audio and video call management
+ * Includes ICE server configuration for WebRTC
  * ============================================
  */
 
-const express = require('express');
-const db = require('../config/database');
-const { verifyToken } = require('../middleware/auth');
+const express = require("express");
+const db = require("../config/database");
+const { verifyToken } = require("../middleware/auth");
 
 const router = express.Router();
+
+// ============================================
+// GET /api/calls/ice-config
+// Returns WebRTC ICE server configuration
+// Including TURN relay servers for NAT traversal
+// ============================================
+router.get("/ice-config", verifyToken, (req, res) => {
+  // Using Open Relay (metered.ca) free TURN servers
+  // For production: sign up at https://www.metered.ca/tools/openrelay/
+  // and replace with your own credentials
+  const iceServers = [
+    // Google STUN servers (only work on same network / open NAT)
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    // Open Relay TURN servers (relay traffic for NAT traversal)
+    // These work across ANY network (WiFi ↔ carrier data)
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443?transport=tcp",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turns:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+  ];
+
+  res.json({
+    success: true,
+    data: {
+      iceServers,
+      // Cache for 1 hour - credentials are long-lived
+      ttl: 3600,
+    },
+  });
+});
 
 // ============================================
 // POST /api/calls/initiate
 // Initiate a new call
 // ============================================
-router.post('/initiate', verifyToken, async (req, res) => {
+router.post("/initiate", verifyToken, async (req, res) => {
   try {
     const { calleeId, type, conversationId } = req.body;
 
     if (!calleeId || !type) {
       return res.status(400).json({
         success: false,
-        message: 'Callee ID and call type are required'
+        message: "Callee ID and call type are required",
       });
     }
 
-    if (!['audio', 'video'].includes(type)) {
+    if (!["audio", "video"].includes(type)) {
       return res.status(400).json({
         success: false,
-        message: 'Call type must be audio or video'
+        message: "Call type must be audio or video",
       });
     }
 
     // Check if callee exists
     const callee = await db.query(
-      'SELECT id, username, full_name, avatar_url, is_online FROM users WHERE id = ?',
-      [calleeId]
+      "SELECT id, username, full_name, avatar_url, is_online FROM users WHERE id = ?",
+      [calleeId],
     );
 
     if (callee.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Callee not found'
+        message: "Callee not found",
       });
     }
 
     // Create call record
     const result = await db.query(
-      'INSERT INTO calls (caller_id, callee_id, conversation_id, type, status) VALUES (?, ?, ?, ?, ?)',
-      [req.userId, calleeId, conversationId || null, type, 'ongoing']
+      "INSERT INTO calls (caller_id, callee_id, conversation_id, type, status) VALUES (?, ?, ?, ?, ?)",
+      [req.userId, calleeId, conversationId || null, type, "ongoing"],
     );
 
     const callId = result.insertId;
 
     // Get caller info
     const caller = await db.query(
-      'SELECT id, username, full_name, avatar_url FROM users WHERE id = ?',
-      [req.userId]
+      "SELECT id, username, full_name, avatar_url FROM users WHERE id = ?",
+      [req.userId],
     );
 
     res.status(201).json({
       success: true,
-      message: 'Call initiated',
+      message: "Call initiated",
       data: {
         call: {
           id: callId,
           caller: caller[0],
           callee: callee[0],
           type,
-          status: 'ongoing',
-          startedAt: new Date().toISOString()
-        }
-      }
+          status: "ongoing",
+          startedAt: new Date().toISOString(),
+        },
+      },
     });
   } catch (error) {
-    console.error('Initiate call error:', error);
+    console.error("Initiate call error:", error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
@@ -88,45 +136,44 @@ router.post('/initiate', verifyToken, async (req, res) => {
 // PUT /api/calls/:callId/answer
 // Answer a call
 // ============================================
-router.put('/:callId/answer', verifyToken, async (req, res) => {
+router.put("/:callId/answer", verifyToken, async (req, res) => {
   try {
     const callId = parseInt(req.params.callId);
 
     if (isNaN(callId)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid call ID'
+        message: "Invalid call ID",
       });
     }
 
     // Check if call exists and user is callee
     const calls = await db.query(
       'SELECT * FROM calls WHERE id = ? AND callee_id = ? AND status = "ongoing"',
-      [callId, req.userId]
+      [callId, req.userId],
     );
 
     if (calls.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Call not found or already ended'
+        message: "Call not found or already ended",
       });
     }
 
     // Update call status
-    await db.query(
-      'UPDATE calls SET status = "answered" WHERE id = ?',
-      [callId]
-    );
+    await db.query('UPDATE calls SET status = "answered" WHERE id = ?', [
+      callId,
+    ]);
 
     res.json({
       success: true,
-      message: 'Call answered'
+      message: "Call answered",
     });
   } catch (error) {
-    console.error('Answer call error:', error);
+    console.error("Answer call error:", error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
@@ -135,45 +182,45 @@ router.put('/:callId/answer', verifyToken, async (req, res) => {
 // PUT /api/calls/:callId/reject
 // Reject a call
 // ============================================
-router.put('/:callId/reject', verifyToken, async (req, res) => {
+router.put("/:callId/reject", verifyToken, async (req, res) => {
   try {
     const callId = parseInt(req.params.callId);
 
     if (isNaN(callId)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid call ID'
+        message: "Invalid call ID",
       });
     }
 
     // Check if call exists and user is callee
     const calls = await db.query(
       'SELECT * FROM calls WHERE id = ? AND callee_id = ? AND status = "ongoing"',
-      [callId, req.userId]
+      [callId, req.userId],
     );
 
     if (calls.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Call not found or already ended'
+        message: "Call not found or already ended",
       });
     }
 
     // Update call status
     await db.query(
       'UPDATE calls SET status = "rejected", ended_at = NOW() WHERE id = ?',
-      [callId]
+      [callId],
     );
 
     res.json({
       success: true,
-      message: 'Call rejected'
+      message: "Call rejected",
     });
   } catch (error) {
-    console.error('Reject call error:', error);
+    console.error("Reject call error:", error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
@@ -182,27 +229,27 @@ router.put('/:callId/reject', verifyToken, async (req, res) => {
 // PUT /api/calls/:callId/end
 // End a call
 // ============================================
-router.put('/:callId/end', verifyToken, async (req, res) => {
+router.put("/:callId/end", verifyToken, async (req, res) => {
   try {
     const callId = parseInt(req.params.callId);
 
     if (isNaN(callId)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid call ID'
+        message: "Invalid call ID",
       });
     }
 
     // Check if call exists and user is participant
     const calls = await db.query(
       'SELECT * FROM calls WHERE id = ? AND (caller_id = ? OR callee_id = ?) AND status IN ("ongoing", "answered")',
-      [callId, req.userId, req.userId]
+      [callId, req.userId, req.userId],
     );
 
     if (calls.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Call not found or already ended'
+        message: "Call not found or already ended",
       });
     }
 
@@ -210,7 +257,7 @@ router.put('/:callId/end', verifyToken, async (req, res) => {
 
     // Calculate duration
     let durationSeconds = 0;
-    if (call.status === 'answered') {
+    if (call.status === "answered") {
       const startTime = new Date(call.started_at);
       const endTime = new Date();
       durationSeconds = Math.floor((endTime - startTime) / 1000);
@@ -219,21 +266,21 @@ router.put('/:callId/end', verifyToken, async (req, res) => {
     // Update call status
     await db.query(
       'UPDATE calls SET status = "ended", ended_at = NOW(), duration_seconds = ? WHERE id = ?',
-      [durationSeconds, callId]
+      [durationSeconds, callId],
     );
 
     res.json({
       success: true,
-      message: 'Call ended',
+      message: "Call ended",
       data: {
-        duration: durationSeconds
-      }
+        duration: durationSeconds,
+      },
     });
   } catch (error) {
-    console.error('End call error:', error);
+    console.error("End call error:", error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
@@ -242,45 +289,45 @@ router.put('/:callId/end', verifyToken, async (req, res) => {
 // PUT /api/calls/:callId/miss
 // Mark call as missed
 // ============================================
-router.put('/:callId/miss', verifyToken, async (req, res) => {
+router.put("/:callId/miss", verifyToken, async (req, res) => {
   try {
     const callId = parseInt(req.params.callId);
 
     if (isNaN(callId)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid call ID'
+        message: "Invalid call ID",
       });
     }
 
     // Check if call exists and user is callee
     const calls = await db.query(
       'SELECT * FROM calls WHERE id = ? AND callee_id = ? AND status = "ongoing"',
-      [callId, req.userId]
+      [callId, req.userId],
     );
 
     if (calls.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Call not found or already ended'
+        message: "Call not found or already ended",
       });
     }
 
     // Update call status
     await db.query(
       'UPDATE calls SET status = "missed", ended_at = NOW() WHERE id = ?',
-      [callId]
+      [callId],
     );
 
     res.json({
       success: true,
-      message: 'Call marked as missed'
+      message: "Call marked as missed",
     });
   } catch (error) {
-    console.error('Miss call error:', error);
+    console.error("Miss call error:", error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
@@ -289,7 +336,7 @@ router.put('/:callId/miss', verifyToken, async (req, res) => {
 // GET /api/calls/history
 // Get call history for current user
 // ============================================
-router.get('/history', verifyToken, async (req, res) => {
+router.get("/history", verifyToken, async (req, res) => {
   try {
     const { limit = 20, offset = 0 } = req.query;
     const limitNum = parseInt(limit);
@@ -318,17 +365,17 @@ router.get('/history', verifyToken, async (req, res) => {
       WHERE c.caller_id = ? OR c.callee_id = ?
       ORDER BY c.started_at DESC
       LIMIT ${limitNum} OFFSET ${offsetNum}`,
-      [req.userId, req.userId]
+      [req.userId, req.userId],
     );
 
     // Get total count
     const countResult = await db.query(
-      'SELECT COUNT(*) as total FROM calls WHERE caller_id = ? OR callee_id = ?',
-      [req.userId, req.userId]
+      "SELECT COUNT(*) as total FROM calls WHERE caller_id = ? OR callee_id = ?",
+      [req.userId, req.userId],
     );
 
     // Format calls
-    const formattedCalls = calls.map(call => ({
+    const formattedCalls = calls.map((call) => ({
       id: call.id,
       type: call.type,
       status: call.status,
@@ -336,17 +383,20 @@ router.get('/history', verifyToken, async (req, res) => {
       endedAt: call.ended_at,
       duration: call.duration_seconds,
       isOutgoing: call.caller_id === req.userId,
-      otherUser: call.caller_id === req.userId ? {
-        id: call.callee_id,
-        username: call.callee_username,
-        fullName: call.callee_fullname,
-        avatarUrl: call.callee_avatar
-      } : {
-        id: call.caller_id,
-        username: call.caller_username,
-        fullName: call.caller_fullname,
-        avatarUrl: call.caller_avatar
-      }
+      otherUser:
+        call.caller_id === req.userId
+          ? {
+              id: call.callee_id,
+              username: call.callee_username,
+              fullName: call.callee_fullname,
+              avatarUrl: call.callee_avatar,
+            }
+          : {
+              id: call.caller_id,
+              username: call.caller_username,
+              fullName: call.caller_fullname,
+              avatarUrl: call.caller_avatar,
+            },
     }));
 
     res.json({
@@ -357,15 +407,15 @@ router.get('/history', verifyToken, async (req, res) => {
           total: countResult[0].total,
           limit: limitNum,
           offset: offsetNum,
-          hasMore: offsetNum + calls.length < countResult[0].total
-        }
-      }
+          hasMore: offsetNum + calls.length < countResult[0].total,
+        },
+      },
     });
   } catch (error) {
-    console.error('Get call history error:', error);
+    console.error("Get call history error:", error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
@@ -374,14 +424,14 @@ router.get('/history', verifyToken, async (req, res) => {
 // GET /api/calls/:callId
 // Get call details
 // ============================================
-router.get('/:callId', verifyToken, async (req, res) => {
+router.get("/:callId", verifyToken, async (req, res) => {
   try {
     const callId = parseInt(req.params.callId);
 
     if (isNaN(callId)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid call ID'
+        message: "Invalid call ID",
       });
     }
 
@@ -399,13 +449,13 @@ router.get('/:callId', verifyToken, async (req, res) => {
       JOIN users caller ON c.caller_id = caller.id
       JOIN users callee ON c.callee_id = callee.id
       WHERE c.id = ? AND (c.caller_id = ? OR c.callee_id = ?)`,
-      [callId, req.userId, req.userId]
+      [callId, req.userId, req.userId],
     );
 
     if (calls.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Call not found'
+        message: "Call not found",
       });
     }
 
@@ -426,22 +476,22 @@ router.get('/:callId', verifyToken, async (req, res) => {
             id: call.caller_id,
             username: call.caller_username,
             fullName: call.caller_fullname,
-            avatarUrl: call.caller_avatar
+            avatarUrl: call.caller_avatar,
           },
           callee: {
             id: call.callee_id,
             username: call.callee_username,
             fullName: call.callee_fullname,
-            avatarUrl: call.callee_avatar
-          }
-        }
-      }
+            avatarUrl: call.callee_avatar,
+          },
+        },
+      },
     });
   } catch (error) {
-    console.error('Get call details error:', error);
+    console.error("Get call details error:", error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error'
+      message: "Internal server error",
     });
   }
 });
